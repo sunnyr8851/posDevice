@@ -76,7 +76,15 @@ android {
     ndkVersion rootProject.ext.ndkVersion
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion
+    // ⭐ REQUIRED FOR REACT NATIVE 0.82 + BLE advertiser ⭐
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
 
+    kotlinOptions {
+        jvmTarget = "17"
+    }
     namespace "com.posbeaconpoc"
     defaultConfig {
         applicationId "com.posbeaconpoc"

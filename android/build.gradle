@@ -1,20 +1,47 @@
 buildscript {
     ext {
-        buildToolsVersion = "36.0.0"
+        buildToolsVersion = "34.0.0"
         minSdkVersion = 24
-        compileSdkVersion = 36
-        targetSdkVersion = 36
+        compileSdkVersion = 34
+        targetSdkVersion = 34
         ndkVersion = "27.1.12297006"
-        kotlinVersion = "2.1.20"
+        kotlinVersion = "2.0.21"
     }
+
     repositories {
         google()
         mavenCentral()
     }
+
     dependencies {
-        classpath("com.android.tools.build:gradle")
+        classpath("com.android.tools.build:gradle:8.5.2")   // REQUIRED
         classpath("com.facebook.react:react-native-gradle-plugin")
-        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.0.21")  // REQUIRED
+    }
+}
+
+/* Force JDK 17 for all modules */
+subprojects {
+    afterEvaluate { project ->
+        if (project.hasProperty("android")) {
+            project.android {
+                compileOptions {
+                    sourceCompatibility JavaVersion.VERSION_17
+                    targetCompatibility JavaVersion.VERSION_17
+                }
+            }
+        }
+    }
+}
+
+/* Force BLE advertiser module to use compileSdkVersion 34 */
+subprojects { subproject ->
+    if (subproject.name.contains("react-native-ble-advertiser")) {
+        subproject.afterEvaluate {
+            if (subproject.hasProperty("android")) {
+                subproject.android.compileSdkVersion = rootProject.ext.compileSdkVersion
+            }
+        }
     }
 }
 

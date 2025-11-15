@@ -76,29 +76,28 @@ function parsePayload(base64Str) {
   if (!base64Str) return null;
 
   try {
-    let raw = Buffer.from(base64Str, "base64").toString("utf8");
+    let raw = Buffer.from(base64Str, 'base64').toString('utf8');
 
     // Remove any garbage bytes before "POS"
-    const idx = raw.indexOf("POS");
+    const idx = raw.indexOf('POS');
     if (idx > 0) {
       raw = raw.substring(idx);
     }
 
     // Must be POS_ID|ORDER_ID
-    const parts = raw.split("|");
+    const parts = raw.split('|');
     if (parts.length < 2) return null;
 
     const posId = parts[0].trim();
     const orderId = parts[1].trim();
 
-    if (!posId.startsWith("POS")) return null;
+    if (!posId.startsWith('POS')) return null;
 
     return { posId, orderId };
   } catch (e) {
     return null;
   }
 }
-
 
 /* ---------------------------------------------
    POS COMPONENT (broadcasts posId|orderId)
@@ -203,97 +202,72 @@ function PosScreen({ deviceId }) {
 --------------------------------------------- */
 function RunnerScreen({ deviceId }) {
   const [running, setRunning] = useState(false);
-  const [devices, setDevices] = useState({}); // keyed by posId
+  const [devices, setDevices] = useState({}); 
+
   const lastRSSI = useRef({});
+  const bufferRef = useRef({});      // live RSSI buffer
+  const devicesRef = useRef({});     // used for backend sending
+const lastUIRSSI = useRef({});
 
-  // process a device (already guaranteed to have a valid payload)
- function processDevice(device, payload) {
-  const posKey = payload.posId;
-  const newRSSI = device.rssi;
+  /* --------------------------
+     PROCESS DEVICE (fast updates)
+  ---------------------------- */
+  function processDevice(device, payload) {
+    const posKey = payload.posId;
+    const newRSSI = device.rssi;
 
-  let tempStatus = "Start";
+    // compute warmer/colder with threshold
+    let tempStatus = "Start";
+    if (lastRSSI.current[posKey] != null) {
+      const oldRSSI = lastRSSI.current[posKey];
+      const diff = newRSSI - oldRSSI;
 
-  if (lastRSSI.current[posKey] != null) {
-    const oldRSSI = lastRSSI.current[posKey];
-
-    const diff = newRSSI - oldRSSI;
-
-    // Add Threshold ±3 dBm
-    if (Math.abs(diff) < 3) {
-      tempStatus = "Same";
-    } else if (diff >= 3) {
-      tempStatus = "🔥 Warmer";
-    } else if (diff <= -3) {
-      tempStatus = "❄️ Colder";
+      if (Math.abs(diff) < 10) tempStatus = "Similar";
+      else if (diff >= 10) tempStatus = "🔥 Warmer";
+      else if (diff <= -10) tempStatus = "❄️ Colder";
     }
-  }
+    lastRSSI.current[posKey] = newRSSI;
 
-  lastRSSI.current[posKey] = newRSSI;
+    // Clean POS ID
+    const cleanPosId = payload.posId.replace(/[^A-Za-z0-9\-]/g, "").trim();
 
-  // Rate limit updates to once every 700ms per POS
-  const now = Date.now();
-  if (
-    !processDevice.lastUpdate ||
-    !processDevice.lastUpdate[posKey] ||
-    now - processDevice.lastUpdate[posKey] > 700
-  ) {
-    processDevice.lastUpdate = processDevice.lastUpdate || {};
-    processDevice.lastUpdate[posKey] = now;
-
-const cleanPosId = payload.posId
-  .replace(/[^A-Za-z0-9\-]/g, "")   // remove any garbage
-  .trim();                           // safety trim
-
-setDevices(prev => {
-  const updated = {
-    ...prev,
-    [cleanPosId]: {
+    // Store only in buffer (not UI)
+    bufferRef.current[cleanPosId] = {
       posId: cleanPosId,
       orderId: payload.orderId,
       rssi: newRSSI,
-      status: tempStatus,
-    }
-  };
-
-  // keep latest copy for interval sending
-  devicesRef.current = updated;
-
-  return updated;
-});
-
-
+      // status: tempStatus,
+    };
   }
-}
 
-
+  /* --------------------------
+     START SCANNING
+  ---------------------------- */
   async function startScan() {
     const ok = await requestBlePermissions();
     if (!ok) {
-      Alert.alert('Permissions Needed', 'Allow Bluetooth permissions.');
+      Alert.alert("Permissions Needed", "Allow Bluetooth permissions.");
       return;
     }
 
     lastRSSI.current = {};
+    bufferRef.current = {};
+    devicesRef.current = {};
     setDevices({});
     setRunning(true);
 
     manager.startDeviceScan(null, { allowDuplicates: true }, (err, device) => {
-      if (err) {
-        console.warn('scan error', err);
-        return;
-      }
+      if (err) return;
 
-      // Extract raw data (manufacturerData or serviceData)
       const raw =
         device.manufacturerData ||
         (device.serviceData && Object.values(device.serviceData)[0]);
 
-      if (!raw) return; // ignore non-POS devices (no payload)
+      if (!raw) return;
 
       const payload = parsePayload(raw);
-      if (!payload) return; // ignore if not in POS|ORDER format
+      if (!payload) return;
 
-      // Now we have a valid POS payload
       processDevice(device, payload);
     });
   }
@@ -303,59 +277,111 @@ setDevices(prev => {
     setRunning(false);
   }
 
-  // convert to sorted array
-  const deviceList = Object.values(devices).sort((a, b) => b.rssi - a.rssi);
-const devicesRef = useRef({});
+  /* --------------------------
+     UPDATE UI EVERY 3 SECONDS
+  ---------------------------- */
+  useEffect(() => {
+    if (!running) return;
 
-  // optional: send proximity to backend (throttled / periodic)
-  async function sendRunnerUpdate(runnerDeviceName, deviceList1) {
-    console.log(!runnerDeviceName , deviceList1.length === 0)
-  if (!runnerDeviceName || deviceList1.length === 0) return;
+    const interval = setInterval(() => {
+      const snapshot = { ...bufferRef.current };
 
- const posArray = deviceList1.map(d => ({
-  deviceId: d.posId.replace(/[^A-Za-z0-9\-]/g, ""), 
-  rssi: d.rssi
-}));
+      setDevices(snapshot);
+      devicesRef.current = snapshot;
+    }, 3000);
 
-  try {
-    console.log(runnerDeviceName,posArray)
-    const resp = await fetch(
-      "https://rssi-server.onrender.com/api/rssi",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          runnerDeviceName,
-          pos: posArray
-        })
-      }
-    );
-
-    const json = await resp.json();
-    console.log("Runner Update Response:", json);
-  } catch (e) {
-    console.log("Runner update error:", e);
-  }
-}
-
-  // example: auto-send every 5 seconds while scanning
- useEffect(() => {
+    return () => clearInterval(interval);
+  }, [running]);
+  useEffect(() => {
   if (!running) return;
 
   const interval = setInterval(() => {
-  const list = Object.values(devicesRef.current);
+    const snapshot = { ...bufferRef.current };
 
-    sendRunnerUpdate(deviceId, list);
-  }, 3000);
+    // build final devices object with warmer/colder logic (3 seconds resolution)
+    const output = {};
+
+    Object.keys(snapshot).forEach(posId => {
+      const currentRSSI = snapshot[posId].rssi;
+      const oldRSSI = lastUIRSSI.current[posId] ?? null;
+
+      let status = "Similar";
+
+      if (oldRSSI !== null) {
+        const diff = currentRSSI - oldRSSI;
+
+        if (Math.abs(diff) < 3) status = "Similar";
+        else if (diff >= 3) status = "🔥 Warmer";
+        else if (diff <= -3) status = "❄️ Colder";
+      }
+
+      // Save for next 3-sec comparison
+      lastUIRSSI.current[posId] = currentRSSI;
+
+      output[posId] = {
+        posId,
+        orderId: snapshot[posId].orderId,
+        rssi: currentRSSI,
+        status
+      };
+    });
+
+    // Update UI + backend reference
+    setDevices(output);
+    devicesRef.current = output;
+
+  }, 3000); // update every 3 seconds
 
   return () => clearInterval(interval);
-}, [running]);   // ❌ remove "devices"
+}, [running]);
+
+
+  /* --------------------------
+     SEND BACKEND EVERY 3 SEC
+  ---------------------------- */
+  async function sendRunnerUpdate(runnerName, deviceList) {
+    if (!runnerName || deviceList.length === 0) return;
+
+    const posArray = deviceList.map(d => ({
+      deviceId: d.posId.replace(/[^A-Za-z0-9\-]/g, ""),
+      rssi: d.rssi
+    }));
+
+    try {
+      const resp = await fetch("https://rssi-server.onrender.com/api/rssi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ runnerDeviceName: runnerName, pos: posArray }),
+      });
+
+      const json = await resp.json();
+      console.log("Runner Update:", json);
+    } catch (e) {
+      console.log("Runner update error:", e);
+    }
+  }
+
+  useEffect(() => {
+    if (!running) return;
+
+    const interval = setInterval(() => {
+      const list = Object.values(devicesRef.current);
+      sendRunnerUpdate(deviceId, list);
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [running]);
+
+  /* --------------------------
+     RENDER UI
+  ---------------------------- */
+  const deviceList = Object.values(devices).sort((a, b) => b.rssi - a.rssi);
 
   return (
     <View style={styles.screen}>
       <Text style={styles.header}>Runner Mode (Scanner)</Text>
 
-      <Text style={{ marginBottom: 6 }}>Runner ID (locked):</Text>
+      <Text style={{ marginBottom: 6 }}>Runner ID:</Text>
       <TextInput style={styles.input} value={deviceId} editable={false} />
 
       <TouchableOpacity
@@ -363,33 +389,29 @@ const devicesRef = useRef({});
         onPress={running ? stopScan : startScan}
       >
         <Text style={styles.buttonText}>
-          {running ? 'Stop Scan' : 'Start Scan'}
+          {running ? "Stop Scan" : "Start Scan"}
         </Text>
       </TouchableOpacity>
 
       <View style={{ marginTop: 18, flex: 1 }}>
         {deviceList.length === 0 ? (
-          <Text style={{ color: '#555' }}>Scanning for POS devices...</Text>
+          <Text style={{ color: "#555" }}>Waiting for POS devices...</Text>
         ) : (
           <ScrollView>
-            {deviceList.map((d, i) => (
+            {deviceList.map(d => (
               <View key={d.posId} style={styles.deviceCard}>
-                <Text style={styles.deviceTitle}>
-                  POS: {d.posId} — Order: {d.orderId}
-                </Text>
+                <Text style={styles.deviceTitle}>POS: {d.posId}</Text>
                 <Text style={styles.deviceRSSI}>RSSI: {d.rssi} dBm</Text>
-                <Text
-                  style={[
-                    styles.deviceStatus,
-                    {
-                      color: d.status.includes('Warmer')
-                        ? '#4CAF50'
-                        : d.status.includes('Colder')
-                        ? '#F44336'
-                        : '#666',
-                    },
-                  ]}
-                >
+                <Text style={[
+                  styles.deviceStatus,
+                  {
+                    color: d.status.includes("Warmer")
+                      ? "#4CAF50"
+                      : d.status.includes("Colder")
+                      ? "#F44336"
+                      : "#666",
+                  },
+                ]}>
                   {d.status}
                 </Text>
               </View>
@@ -663,9 +685,7 @@ export default function App() {
         <Text style={styles.headerBarText}>
           {role === 'pos' ? `POS — ${deviceId}` : `Runner — ${deviceId}`}
         </Text>
-        <TouchableOpacity
-          onPress={handleLogout}
-        >
+        <TouchableOpacity onPress={handleLogout}>
           <Text style={{ color: '#ff3333' }}>Logout</Text>
         </TouchableOpacity>
       </View>

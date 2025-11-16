@@ -203,6 +203,8 @@ function PosScreen({ deviceId }) {
 function RunnerScreen({ deviceId }) {
   const [running, setRunning] = useState(false);
   const [devices, setDevices] = useState({});
+const rssiWindowRef = useRef({});     // { posId: [rssiWindow] }
+const lastAvgRef = useRef({});        // { posId: lastAvg }
 
   const lastRSSI = useRef({});
   const bufferRef = useRef({}); // live RSSI buffer
@@ -219,34 +221,56 @@ function RunnerScreen({ deviceId }) {
   /* --------------------------
      PROCESS DEVICE (fast updates)
   ---------------------------- */
-  function processDevice(device, payload) {
-    const posKey = payload.posId;
-    const newRSSI = device.rssi;
+function processDevice(device, payload) {
+  const posKey = payload.posId;
+  const newRSSI = device.rssi;
 
-    // compute warmer/colder with threshold
-    let tempStatus = 'Start';
-    if (lastRSSI.current[posKey] != null) {
-      const oldRSSI = lastRSSI.current[posKey];
-      const diff = newRSSI - oldRSSI;
-
-      if (Math.abs(diff) < 10) tempStatus = 'Similar';
-      else if (diff >= 10) tempStatus = '🔥 Warmer';
-      else if (diff <= -10) tempStatus = '❄️ Colder';
-    }
-    lastRSSI.current[posKey] = newRSSI;
-    const distance = estimateDistance(newRSSI);
-    // Clean POS ID
-    const cleanPosId = payload.posId.replace(/[^A-Za-z0-9\-]/g, '').trim();
-
-    // Store only in buffer (not UI)
-    bufferRef.current[cleanPosId] = {
-      posId: cleanPosId,
-      orderId: payload.orderId,
-      rssi: newRSSI,
-      status: "Similar",
-      distance: distance ? distance.toFixed(2) : null, // in meters
-    };
+  // Ensure window exists
+  if (!rssiWindowRef.current[posKey]) {
+    rssiWindowRef.current[posKey] = [];
   }
+
+  // Push RSSI into window
+  const window = rssiWindowRef.current[posKey];
+  window.push(newRSSI);
+
+  // Limit window size to 8
+  if (window.length > 8) window.shift();
+
+  // --- Compute average RSSI ---
+  const avgRSSI =
+    window.reduce((sum, v) => sum + v, 0) / window.length;
+
+  // --- Trend check (vs previous window's avg) ---
+  let trend = "Similar";
+  const prevAvg = lastAvgRef.current[posKey];
+
+  if (prevAvg !== undefined) {
+    const diff = avgRSSI - prevAvg;
+    if (Math.abs(diff) < 3) trend = "Similar";
+    else if (diff >= 3) trend = "🔥 Warmer";
+    else if (diff <= -3) trend = "❄️ Colder";
+  }
+
+  lastAvgRef.current[posKey] = avgRSSI;
+
+  // --- Distance using averaged RSSI ---
+  const txPower = -59;     // Adjustable
+  const n = 2.2;           // Environment factor
+  const ratio = (txPower - avgRSSI) / (10 * n);
+  const distance = Math.pow(10, ratio);
+
+  const cleanPosId = posKey.replace(/[^A-Za-z0-9\-]/g, "");
+
+  bufferRef.current[cleanPosId] = {
+    posId: cleanPosId,
+    orderId: payload.orderId,
+    rssi: Math.round(avgRSSI),       // USE SMOOTHED RSSI
+    status: trend,                   // stable trend
+    distance: distance.toFixed(2),   // stable distance
+  };
+}
+
 
   /* --------------------------
      START SCANNING

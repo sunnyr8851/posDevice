@@ -202,12 +202,19 @@ function PosScreen({ deviceId }) {
 --------------------------------------------- */
 function RunnerScreen({ deviceId }) {
   const [running, setRunning] = useState(false);
-  const [devices, setDevices] = useState({}); 
+  const [devices, setDevices] = useState({});
 
   const lastRSSI = useRef({});
-  const bufferRef = useRef({});      // live RSSI buffer
-  const devicesRef = useRef({});     // used for backend sending
-const lastUIRSSI = useRef({});
+  const bufferRef = useRef({}); // live RSSI buffer
+  const devicesRef = useRef({}); // used for backend sending
+  const lastUIRSSI = useRef({});
+
+  function estimateDistance(rssi, txPower = -59, n = 2) {
+    if (!rssi || rssi === 0) return null;
+
+    const ratio = (txPower - rssi) / (10 * n);
+    return Math.pow(10, ratio);
+  }
 
   /* --------------------------
      PROCESS DEVICE (fast updates)
@@ -217,26 +224,27 @@ const lastUIRSSI = useRef({});
     const newRSSI = device.rssi;
 
     // compute warmer/colder with threshold
-    let tempStatus = "Start";
+    let tempStatus = 'Start';
     if (lastRSSI.current[posKey] != null) {
       const oldRSSI = lastRSSI.current[posKey];
       const diff = newRSSI - oldRSSI;
 
-      if (Math.abs(diff) < 10) tempStatus = "Similar";
-      else if (diff >= 10) tempStatus = "🔥 Warmer";
-      else if (diff <= -10) tempStatus = "❄️ Colder";
+      if (Math.abs(diff) < 10) tempStatus = 'Similar';
+      else if (diff >= 10) tempStatus = '🔥 Warmer';
+      else if (diff <= -10) tempStatus = '❄️ Colder';
     }
     lastRSSI.current[posKey] = newRSSI;
-
+    const distance = estimateDistance(newRSSI);
     // Clean POS ID
-    const cleanPosId = payload.posId.replace(/[^A-Za-z0-9\-]/g, "").trim();
+    const cleanPosId = payload.posId.replace(/[^A-Za-z0-9\-]/g, '').trim();
 
     // Store only in buffer (not UI)
     bufferRef.current[cleanPosId] = {
       posId: cleanPosId,
       orderId: payload.orderId,
       rssi: newRSSI,
-      // status: tempStatus,
+      status: "Similar",
+      distance: distance ? distance.toFixed(2) : null, // in meters
     };
   }
 
@@ -246,7 +254,7 @@ const lastUIRSSI = useRef({});
   async function startScan() {
     const ok = await requestBlePermissions();
     if (!ok) {
-      Alert.alert("Permissions Needed", "Allow Bluetooth permissions.");
+      Alert.alert('Permissions Needed', 'Allow Bluetooth permissions.');
       return;
     }
 
@@ -280,57 +288,51 @@ const lastUIRSSI = useRef({});
   /* --------------------------
      UPDATE UI EVERY 3 SECONDS
   ---------------------------- */
-  useEffect(() => {
-    if (!running) return;
+  // UPDATE UI EVERY 3 SECONDS
+useEffect(() => {
+  if (!running) return;
+  const interval = setInterval(() => {
+    const snapshot = { ...bufferRef.current };
+    setDevices(snapshot);
+    devicesRef.current = snapshot;
+  }, 3000);
+  return () => clearInterval(interval);
+}, [running]);
 
-    const interval = setInterval(() => {
-      const snapshot = { ...bufferRef.current };
-
-      setDevices(snapshot);
-      devicesRef.current = snapshot;
-    }, 3000);
-
-    return () => clearInterval(interval);
-  }, [running]);
-  useEffect(() => {
+ useEffect(() => {
   if (!running) return;
 
   const interval = setInterval(() => {
     const snapshot = { ...bufferRef.current };
-
-    // build final devices object with warmer/colder logic (3 seconds resolution)
     const output = {};
 
     Object.keys(snapshot).forEach(posId => {
       const currentRSSI = snapshot[posId].rssi;
-      const oldRSSI = lastUIRSSI.current[posId] ?? null;
+      const prevRSSI = lastUIRSSI.current[posId] ?? null;
 
       let status = "Similar";
 
-      if (oldRSSI !== null) {
-        const diff = currentRSSI - oldRSSI;
+      if (prevRSSI !== null) {
+        const diff = currentRSSI - prevRSSI;
 
-        if (Math.abs(diff) < 3) status = "Similar";
-        else if (diff >= 3) status = "🔥 Warmer";
-        else if (diff <= -3) status = "❄️ Colder";
+        if (Math.abs(diff) >= 8) {
+          status = diff > 0 ? "🔥 Warmer" : "❄️ Colder";
+        }
       }
 
-      // Save for next 3-sec comparison
+      // STORE FOR NEXT 3-SEC COMPARISON
       lastUIRSSI.current[posId] = currentRSSI;
 
       output[posId] = {
-        posId,
-        orderId: snapshot[posId].orderId,
-        rssi: currentRSSI,
-        status
+        ...snapshot[posId],
+        status,
       };
     });
 
-    // Update UI + backend reference
     setDevices(output);
     devicesRef.current = output;
 
-  }, 3000); // update every 3 seconds
+  }, 3000);
 
   return () => clearInterval(interval);
 }, [running]);
@@ -343,21 +345,21 @@ const lastUIRSSI = useRef({});
     if (!runnerName || deviceList.length === 0) return;
 
     const posArray = deviceList.map(d => ({
-      deviceId: d.posId.replace(/[^A-Za-z0-9\-]/g, ""),
-      rssi: d.rssi
+      deviceId: d.posId.replace(/[^A-Za-z0-9\-]/g, ''),
+      rssi: d.rssi,
     }));
 
     try {
-      const resp = await fetch("https://rssi-server.onrender.com/api/rssi", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+      const resp = await fetch('https://rssi-server.onrender.com/api/rssi', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ runnerDeviceName: runnerName, pos: posArray }),
       });
 
       const json = await resp.json();
-      console.log("Runner Update:", json);
+      console.log('Runner Update:', json);
     } catch (e) {
-      console.log("Runner update error:", e);
+      console.log('Runner update error:', e);
     }
   }
 
@@ -389,33 +391,46 @@ const lastUIRSSI = useRef({});
         onPress={running ? stopScan : startScan}
       >
         <Text style={styles.buttonText}>
-          {running ? "Stop Scan" : "Start Scan"}
+          {running ? 'Stop Scan' : 'Start Scan'}
         </Text>
       </TouchableOpacity>
 
       <View style={{ marginTop: 18, flex: 1 }}>
         {deviceList.length === 0 ? (
-          <Text style={{ color: "#555" }}>Waiting for POS devices...</Text>
+          <Text style={{ color: '#555' }}>Waiting for POS devices...</Text>
         ) : (
           <ScrollView>
-            {deviceList.map(d => (
-              <View key={d.posId} style={styles.deviceCard}>
-                <Text style={styles.deviceTitle}>POS: {d.posId}</Text>
-                <Text style={styles.deviceRSSI}>RSSI: {d.rssi} dBm</Text>
-                <Text style={[
-                  styles.deviceStatus,
-                  {
-                    color: d.status.includes("Warmer")
-                      ? "#4CAF50"
-                      : d.status.includes("Colder")
-                      ? "#F44336"
-                      : "#666",
-                  },
-                ]}>
-                  {d.status}
-                </Text>
-              </View>
-            ))}
+            {deviceList.map(d => {
+              const status = d.status || 'Similar';
+              const isWarmer = status.includes('Warmer');
+              const isColder = status.includes('Colder');
+
+              return (
+                <View key={d.posId} style={styles.deviceCard}>
+                  <Text style={styles.deviceTitle}>POS: {d.posId}</Text>
+                  <Text style={styles.deviceRSSI}>RSSI: {d.rssi} dBm</Text>
+
+                  <Text
+                    style={[
+                      styles.deviceStatus,
+                      {
+                        color: isWarmer
+                          ? '#4CAF50'
+                          : isColder
+                          ? '#F44336'
+                          : '#666',
+                      },
+                    ]}
+                  >
+                    {status}
+                  </Text>
+
+                  <Text style={styles.deviceRSSI}>
+                    Distance: {d.distance ? d.distance + ' m' : '—'}{` (Approx)`}
+                  </Text>
+                </View>
+              );
+            })}
           </ScrollView>
         )}
       </View>
